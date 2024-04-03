@@ -58,18 +58,19 @@ mod tests;
 use core::mem::size_of;
 use core::option::Option;
 use core::result::Result;
-#[cfg(feature = "stm32f103")]
-use stm32f1xx_hal::flash::{Error as FlashError, FlashSize, Parts, SectorSize};
 
-#[cfg(not(feature = "stm32f103"))]
-type FlashError = ();
-#[cfg(not(feature = "stm32f103"))]
+//#[cfg(feature = "stm32f103")]
+//use stm32f1xx_hal::flash::{Error as FlashError, FlashSize, Parts, SectorSize};
+
+//#[cfg(not(feature = "stm32f103"))]
+//type FlashError = ();
+//#[cfg(not(feature = "stm32f103"))]
 type SectorSize = u32;
-#[cfg(not(feature = "stm32f103"))]
+//#[cfg(not(feature = "stm32f103"))]
 type FlashSize = u32;
 
 /// Result type for flash operations.
-type FlashResult<T> = Result<T, FlashError>;
+type FlashResult<T, E> = Result<T, E>;
 
 // STM32 allows programming half-words
 type HalfWord = u16;
@@ -94,37 +95,42 @@ pub struct Params {
     pub page_count: u32,
 }
 
+
 /// EEPROM-capable peripheral.
 pub trait EEPROMExt
 where
     Self: Sized,
 {
     /// Create EEPROM controller with given configuration.
-    fn eeprom(self, params: Params) -> EEPROM<Self>;
+    fn eeprom<E: core::fmt::Debug>(self, params: Params) -> EEPROM<E, Self>;
 }
 
+
 /// Low-level trait used by EEPROM implementation to access flash memory.
-pub trait Flash {
+pub trait Flash<E: core::fmt::Debug> {
     /// Read half-word (16-bit) value at a specified address. `address` must be an address of
     /// a location in the Flash memory aligned to two bytes.
-    fn read(&mut self, params: &Params, offset: u32) -> FlashResult<HalfWord>;
+    fn read(&mut self, params: &Params, offset: u32) -> FlashResult<HalfWord, E>;
 
     /// Write half-word (16-bit) value at a specified address. `address` must be an address of
     /// a location in the Flash memory aligned to two bytes.
-    fn write(&mut self, params: &Params, offset: u32, data: u16) -> FlashResult<()>;
+    fn write(&mut self, params: &Params, offset: u32, data: u16) -> FlashResult<(), E>;
 
     /// Erase specified flash page. `address` must be an address of a beginning of the page in
     /// Flash memory.
-    fn page_erase(&mut self, params: &Params, address: u32) -> FlashResult<()>;
+    fn page_erase(&mut self, params: &Params, address: u32) -> FlashResult<(), E>;
 }
 
+/*
 #[cfg(feature = "stm32f103")]
 impl<'a> EEPROMExt for &'a mut Parts {
     fn eeprom(self, params: Params) -> EEPROM<Self> {
         EEPROM::new(params, self)
     }
 }
+*/
 
+/*
 #[cfg(feature = "stm32f103")]
 impl<'a> Flash for &'a mut Parts {
     fn read(&mut self, params: &Params, address: u32) -> FlashResult<HalfWord> {
@@ -145,18 +151,25 @@ impl<'a> Flash for &'a mut Parts {
         Ok(())
     }
 }
+*/
 
-/// EEPROM controller. Uses Flash for implementing key-value storage for 16-bit data values.
-pub struct EEPROM<F> {
+/// EEPROM controller.
+/// Uses Flash for implementing key-value storage for 16-bit data values.
+pub struct EEPROM<E, F> {
     params: Params,
-    // Amount of items per page (full words)
+
+    /// Amount of items per page (full words)
     page_items: u32,
+
     flash: F,
+
+    error_type: core::marker::PhantomData<E>
 }
 
-impl<F> EEPROM<F>
+impl<E, F> EEPROM<E, F>
 where
-    F: Flash,
+    E: core::fmt::Debug,
+    F: Flash<E>,
 {
     /// Create new EEPROM controller.
     pub fn new(params: Params, flash: F) -> Self {
@@ -164,12 +177,13 @@ where
             params,
             page_items: (params.page_size as u32) * 1024 / ITEM_SIZE,
             flash,
+            error_type: core::marker::PhantomData::default()
         }
     }
 
     /// Initialize EEPROM controller. Checks that all internal data structures are in consistent
     /// state and fixes them otherwise.
-    pub fn init(&mut self) -> FlashResult<()> {
+    pub fn init(&mut self) -> FlashResult<(), E> {
         let active = self.find_active();
         for page in 0..self.params.page_count {
             match active {
@@ -188,7 +202,7 @@ where
     }
 
     /// Erase all values stored in EEPROM
-    pub fn erase(&mut self) -> FlashResult<()> {
+    pub fn erase(&mut self) -> FlashResult<(), E> {
         for page in 0..self.params.page_count {
             let start_offset =
                 (self.params.first_page + page) * (self.params.page_size as u32) * 1024;
@@ -217,7 +231,7 @@ where
     /// * panics if active page cannot be found
     /// * panics if page is full even after compacting it to the empty one
     /// * panics if tag value has the most significant bit set to `1` (reserved value)
-    pub fn write(&mut self, tag: HalfWord, data: HalfWord) -> FlashResult<()> {
+    pub fn write(&mut self, tag: HalfWord, data: HalfWord) -> FlashResult<(), E> {
         assert_eq!(tag & 0b1000_0000_0000_0000, 0, "msb bit of `1` is reserved");
 
         let page = self.find_active().expect("cannot find active page");
@@ -233,7 +247,7 @@ where
         panic!("too many variables");
     }
 
-    fn rescue_if_full(&mut self, src_page: u32) -> Result<u32, FlashError> {
+    fn rescue_if_full(&mut self, src_page: u32) -> Result<u32, E> {
         // Check if last word of the page was written or not
         // Note that we check both data and the tag as in case of failure we might write
         // data, but not the tag.
@@ -290,7 +304,7 @@ where
         self.flash.read(&self.params, page_offset).unwrap()
     }
 
-    fn set_page_status(&mut self, page: u32, status: HalfWord) -> FlashResult<()> {
+    fn set_page_status(&mut self, page: u32, status: HalfWord) -> FlashResult<(), E> {
         let page_offset = self.page_offset(page);
         self.flash.write(&self.params, page_offset, status)
     }
@@ -323,7 +337,7 @@ where
         ((item & 0xffff) as HalfWord, (item >> 16) as HalfWord)
     }
 
-    fn erase_page(&mut self, page: u32) -> FlashResult<()> {
+    fn erase_page(&mut self, page: u32) -> FlashResult<(), E> {
         if self.is_page_dirty(page) {
             let page_offset = self.page_offset(page);
             let result = self.flash.page_erase(&self.params, page_offset);
@@ -350,7 +364,7 @@ where
         pos: u32,
         tag: HalfWord,
         data: HalfWord,
-    ) -> FlashResult<()> {
+    ) -> FlashResult<(), E> {
         let item_addr = self.item_offset(page, pos);
 
         // Not found -- write the value first, so if we fail for whatever reason,

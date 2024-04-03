@@ -1,5 +1,5 @@
-use super::EEPROM;
-use crate::{EEPROMExt, Flash, FlashResult, HalfWord, Params};
+use super::{EEPROM, EEPROMExt};
+use crate::{/*EEPROMExt,*/ Flash, FlashResult, HalfWord, Params};
 use std::mem::size_of;
 use std::vec::Vec;
 
@@ -28,7 +28,7 @@ struct MockFlash {
 
 // Emulate MCU flash memory & FLASH control registers
 impl MockFlash {
-    fn load(filename: &str, page_size: u32, page_count: u32) -> MockFlash {
+    fn load(filename: &str, page_size: u32, page_count: u32) -> Self {
         let size = page_size * page_count / (size_of::<u16>() as u32);
         let flash_mem = memdump::read_dump(filename);
 
@@ -41,32 +41,34 @@ impl MockFlash {
     }
 }
 
-impl<'a> Flash for &'a mut MockFlash {
-    fn read(&mut self, _params: &Params, offset: u32) -> FlashResult<HalfWord> {
+impl<'a, E: core::fmt::Debug> Flash<E> for &'a mut MockFlash {
+    fn read(&mut self, _params: &Params, offset: u32) -> FlashResult<HalfWord, E> {
         Ok(self.flash_mem[(offset / 2) as usize])
     }
 
-    fn page_erase(&mut self, _params: &Params, offset: u32) -> FlashResult<()> {
+    fn write(&mut self, _params: &Params, offset: u32, data: u16) -> FlashResult<(), E> {
+        self.flash_mem[(offset / 2) as usize] = data;
+        Ok(())
+    }
+
+    fn page_erase(&mut self, _params: &Params, offset: u32) -> FlashResult<(), E> {
         assert_eq!(offset % self.page_size, 0);
         for i in 0..(self.page_size / 2) {
             self.flash_mem[((offset / 2) + i) as usize] = 0xffff;
         }
         Ok(())
     }
-
-    fn write(&mut self, _params: &Params, offset: u32, data: u16) -> FlashResult<()> {
-        self.flash_mem[(offset / 2) as usize] = data;
-        Ok(())
-    }
 }
 
+
 impl<'a> EEPROMExt for &'a mut MockFlash {
-    fn eeprom(self, config: Params) -> EEPROM<Self> {
+    fn eeprom<E: core::fmt::Debug>(self, config: Params) -> EEPROM<E, Self> {
         EEPROM::new(config, self)
     }
 }
 
-fn test(initial: &str, expected: &str, cb: for<'a> fn(&mut EEPROM<&'a mut MockFlash>)) {
+
+fn test(initial: &str, expected: &str, cb: for<'a> fn(&mut EEPROM<(), &'a mut MockFlash>)) {
     let mut mcu = MockFlash::load(initial, 1024, 2);
     let params = Params {
         first_page: 0,
@@ -204,7 +206,7 @@ fn test_read_full_simple() {
         page_size: 1,
         page_count: mcu.page_count,
     };
-    let mut eeprom = mcu.eeprom(params);
+    let mut eeprom = mcu.eeprom::<()>(params);
 
     assert_eq!(0xdead, eeprom.read(1).unwrap()); // last item on the page
     assert_eq!(0xbeef, eeprom.read(2).unwrap());
@@ -225,7 +227,7 @@ fn test_read_full_simple_duplicated() {
         page_size: 1,
         page_count: mcu.page_count,
     };
-    let mut eeprom = mcu.eeprom(params);
+    let mut eeprom = mcu.eeprom::<()>(params);
 
     assert_eq!(0xdead, eeprom.read(1).unwrap());
     assert_eq!(0xbeef, eeprom.read(2).unwrap());
